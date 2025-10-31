@@ -1,7 +1,7 @@
 # cross_corr_mk2.py
 
 # Standard Library Imports
-from ast import Tuple
+from typing import Tuple
 import os, sys
 import traceback
 
@@ -30,7 +30,7 @@ if __name__ == "__main__":
     os.system('')  # Enables ANSI escape characters in terminal (Windows)
     try:
         
-        sign, sync = gen_sign()
+        sign, sync, _ = gen_sign()
         # ----- Параметри експерименту
         N = 1024
         K = 64

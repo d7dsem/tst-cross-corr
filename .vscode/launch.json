@@ -17,7 +17,7 @@
             "name": "CC",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/cross_corr_mk3.py",
+            "program": "${workspaceFolder}/cross_corr_mk4.py",
             "console": "integratedTerminal",
             "args": []
         },

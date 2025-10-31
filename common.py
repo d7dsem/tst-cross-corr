@@ -28,7 +28,7 @@ OK = GREEN + "[ OK ]" + RESET
 
 import inspect
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Literal, Optional, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -280,19 +280,21 @@ def plot_lab_detect_detailed(result: dict):
     print(f"Confidence drop: {np.mean(conf_clean) - np.mean(conf_noisy):.3f}")
 
 
-from typing import Tuple
-import numpy as np
+
 
 def gen_sign(
     SYNC_LN: int = 24,
-    M: int = 120,                 # сумарно M ліворуч і M праворуч від sync
-    SUPER_FRAME_LN: int = 6,      # бурстів у суперкадрі; лише перший містить sync
-    SF_COUNT: int = 4,            # кількість суперкадрів
-    GUARD: float = 0.2,           # частка від довжини бурста у відліках
-    SPS: int = 10,                # відліків на символ
-    SIGN_STD: float = 1.0,        # амплітуда сигналу
-    seed_sync: int = 42
-) -> Tuple[np.ndarray, np.ndarray]:
+    M: int = 120,
+    SUPER_FRAME_LN: int = 6,
+    SF_COUNT: int = 4,
+    GUARD: float = 0.2,
+    SPS: int = 10,
+    SIGN_STD: float = 1.0,
+    seed_sync: int = 42,
+    sync_corrupt_prob: float | None = None,
+    sync_corrupt_smb_part_max: float | None = None,
+    sync_corrupt_samp_part_max: float | None = None,
+) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
     Генерує сигнал із суперкадрами та бурстами однакової довжини.
     BURST_LEN_sym = 2*M + SYNC_LN  (у символах) — для всіх бурстів.
@@ -302,11 +304,17 @@ def gen_sign(
         1-й у суперкадрі: [MSG_1 (M)][SYNC (SYNC_LN)][MSG_2 (M)] + GUARD
         інші:              [MSG_1 (M)][RANDOM_BLOCK (SYNC_LN)][MSG_2 (M)] + GUARD
 
+    Параметри пошкодження синхри:
+        sync_corrupt_prob: ймовірність того, що конкретна синхра буде пошкоджена, використовується для dice (кидка кубика)
+        sync_corrupt_smb_part_max: максимальна частка символів синхри, які будуть повністю пошкоджені
+        sync_corrupt_samp_part_max: максимальна частка відліків синхри, які будуть пошкоджені (override sync_corrupt_smb_part_max, якщо вказано)
+        
     Повертає:
         signal : np.ndarray (float32) — часовий ряд усіх суперкадрів
         sync   : np.ndarray (float32) — еталонний SYNC у відліках (довжина SYNC_LN*SPS)
+        stats  : Dict — статистика пошкоджень {sf_idx: {'corrupted': bool, 'mode': str, 'count': int}}
     """
-   # --- фіксована синхра ---
+    # --- фіксована синхра ---
     np.random.seed(seed_sync)
     sync = np.random.uniform(-SIGN_STD, SIGN_STD, SYNC_LN * SPS).astype(np.float32)
 
@@ -321,6 +329,8 @@ def gen_sign(
     signal = np.random.uniform(-SIGN_STD, SIGN_STD, N).astype(np.float32)
 
     burst_step = BURST_LEN + GUARD_LEN
+    corruption_stats = {}
+    
     for sf in range(SF_COUNT):
         for b in range(SUPER_FRAME_LN):
             base = (sf * SUPER_FRAME_LN + b) * burst_step
@@ -328,14 +338,146 @@ def gen_sign(
             mid_end = mid_start + SYNC_LN * SPS
 
             if b == 0:
+                # Вставляємо синхру
                 signal[mid_start:mid_end] = sync
+                
+                # Статистика для цього суперкадру
+                stats_entry = {'corrupted': False, 'mode': None, 'count': 0}
+                
+                # Перевіряємо чи потрібно пошкодити цю синхру
+                if sync_corrupt_prob is not None and (np.random.rand() < sync_corrupt_prob):
+                    stats_entry['corrupted'] = True
+                    
+                    # Вибір режиму пошкодження
+                    # sync_corrupt_samp_part_max має пріоритет
+                    if sync_corrupt_samp_part_max is not None:
+                        # Режим повідлікового пошкодження
+                        stats_entry['mode'] = 'sample'
+                        
+                        corrupt_part = np.random.uniform(0, sync_corrupt_samp_part_max)
+                        total_samples = SYNC_LN * SPS
+                        n_corrupt_samples = int(np.ceil(total_samples * corrupt_part))
+                        n_corrupt_samples = max(1, min(n_corrupt_samples, total_samples))
+                        
+                        # Випадково обираємо які відліки пошкодити
+                        corrupt_indices = np.random.choice(total_samples, size=n_corrupt_samples, replace=False)
+                        
+                        # Пошкоджуємо обрані відліки
+                        for idx in corrupt_indices:
+                            signal[mid_start + idx] = np.random.uniform(-SIGN_STD, SIGN_STD)
+                        
+                        stats_entry['count'] = n_corrupt_samples
+                        
+                    elif sync_corrupt_smb_part_max is not None:
+                        # Режим посимвольного пошкодження
+                        stats_entry['mode'] = 'symbol'
+                        
+                        corrupt_part = np.random.uniform(0, sync_corrupt_smb_part_max)
+                        n_corrupt_symbols = int(np.ceil(SYNC_LN * corrupt_part))
+                        n_corrupt_symbols = max(1, min(n_corrupt_symbols, SYNC_LN))
+                        
+                        # Випадково обираємо які символи пошкодити
+                        corrupt_indices = np.random.choice(SYNC_LN, size=n_corrupt_symbols, replace=False)
+                        
+                        # Пошкоджуємо обрані символи (всі SPS відліків)
+                        for idx in corrupt_indices:
+                            sample_start = mid_start + idx * SPS
+                            sample_end = sample_start + SPS
+                            signal[sample_start:sample_end] = np.random.uniform(
+                                -SIGN_STD, SIGN_STD, SPS
+                            ).astype(np.float32)
+                        
+                        stats_entry['count'] = n_corrupt_symbols
+                
+                corruption_stats[sf] = stats_entry
 
             # guard зона
             guard_start = base + BURST_LEN
             guard_end = guard_start + GUARD_LEN
             signal[guard_start:guard_end] = 0.0
 
-    return signal, sync
+    return signal, sync, corruption_stats
+
+def print_corruption_info(
+    corruption_stats: Dict,
+    mode: Literal["brief", "verbose"] = "brief",
+    color: bool = True
+) -> None:
+    """
+    Виводить інформацію про пошкодження синхропослідовностей.
+    
+    Args:
+        corruption_stats: словник статистики з gen_sign()
+        mode: "brief" (загальна статистика) або "verbose" (детально по кожному SF)
+        color: використовувати кольорове форматування
+    """
+    if not corruption_stats:
+        print(f"{INFO if color else '[INFO]'} No corruption stats available.")
+        return
+    
+    total_sf = len(corruption_stats)
+    corrupted_sf = sum(1 for stat in corruption_stats.values() if stat['corrupted'])
+    uncorrupted_sf = total_sf - corrupted_sf
+    
+    # Статистика по режимах пошкодження
+    mode_counts = {}
+    total_corrupted_units = 0
+    for stat in corruption_stats.values():
+        if stat['corrupted']:
+            mode_name = stat['mode']
+            mode_counts[mode_name] = mode_counts.get(mode_name, 0) + 1
+            total_corrupted_units += stat['count']
+    
+    # Brief mode
+    if mode == "brief":
+        corr_color = BRIGHT_RED if color else ""
+        ok_color = BRIGHT_GREEN if color else ""
+        info_color = CYAN if color else ""
+        reset = RESET if color else ""
+        
+        print(f"{INFO if color else '[INFO]'} Corruption statistics:")
+        print(f"  Total superframes: {info_color}{total_sf}{reset}")
+        print(f"  Corrupted: {corr_color}{corrupted_sf}{reset} ({corrupted_sf/total_sf*100:.1f}%)")
+        print(f"  Clean: {ok_color}{uncorrupted_sf}{reset} ({uncorrupted_sf/total_sf*100:.1f}%)")
+        
+        if mode_counts:
+            print(f"  Corruption modes:")
+            for mode_name, count in mode_counts.items():
+                unit_name = "samples" if mode_name == "sample" else "symbols"
+                avg_units = total_corrupted_units / corrupted_sf if corrupted_sf > 0 else 0
+                print(f"    {mode_name}: {info_color}{count}{reset} SF, avg {avg_units:.1f} {unit_name}/SF")
+    
+    # Verbose mode
+    elif mode == "verbose":
+        corr_color = BRIGHT_RED if color else ""
+        ok_color = BRIGHT_GREEN if color else ""
+        info_color = CYAN if color else ""
+        yellow_color = YELLOW if color else ""
+        reset = RESET if color else ""
+        
+        print(f"{INFO if color else '[INFO]'} Detailed corruption statistics:")
+        print(f"  Total: {info_color}{total_sf}{reset} SF | "
+              f"Corrupted: {corr_color}{corrupted_sf}{reset} | "
+              f"Clean: {ok_color}{uncorrupted_sf}{reset}\n")
+        
+        for sf_idx in sorted(corruption_stats.keys()):
+            stat = corruption_stats[sf_idx]
+            
+            if stat['corrupted']:
+                mode_name = stat['mode']
+                unit_name = "samp" if mode_name == "sample" else "symb"
+                status_color = corr_color
+                status_text = f"CORRUPTED ({mode_name})"
+                detail = f"{stat['count']} {unit_name}"
+            else:
+                status_color = ok_color
+                status_text = "CLEAN"
+                detail = "---"
+            
+            print(f"  SF {sf_idx:3d}: {status_color}{status_text:20s}{reset} | {yellow_color}{detail}{reset}")
+    
+    else:
+        print(f"{ERR if color else '[ERROR]'} Unknown mode '{mode}'. Use 'brief' or 'verbose'.")
 
 
 def plot_signal_structure(signal: np.ndarray, SYNC_LN: int, M: int, SUPER_FRAME_LN: int,
@@ -429,16 +571,7 @@ def plot_cross_corr(peaks:np.ndarray, vals:np.ndarray, corr:np.ndarray, title: s
             plt.close(event.canvas.figure)
     plt.gcf().canvas.mpl_connect('key_press_event', _on_key)
     plt.show(block=block)
-        
-@dataclass
-class CorrDetectResult:
-    peaks_idx: np.ndarray          # (M,) індекси піків у кореляції
-    peaks_score: np.ndarray        # (M,) значення NCC у піках ∈ [-1, 1]
-    confidence: np.ndarray         # (M,) peak_value / σ_фону
-    decision: np.ndarray           # (M,) True/False за порогом tau
-    corr: Optional[np.ndarray]     # (N-K+1,), опціонально: весь масив NCC
-    snr_time_db: Optional[float]   # SNR часу, якщо передано clean
-    snr_freq_db: Optional[float]   # SNR частоти, якщо передано clean
-    meta: dict                     # допоміжні поля: N, K, tau, radius, ...
+
+
 
 
