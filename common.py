@@ -1,3 +1,13 @@
+import os, sys
+import inspect
+from dataclasses import dataclass
+from time import perf_counter
+from pathlib import Path
+from typing import Dict, Literal, Optional, Tuple
+from datetime import datetime
+import numpy as np
+import matplotlib.pyplot as plt
+
 
 # ANSI color codes for terminal output
 GREEN = "\033[92m"
@@ -26,21 +36,119 @@ INFO = YELLOW + "[INFO]" + RESET
 DBG = GRAY + "[DeBG]" + RESET
 OK = GREEN + "[ OK ]" + RESET
 
-import inspect
-from dataclasses import dataclass
-from typing import Dict, Literal, Optional, Tuple
-import numpy as np
-import matplotlib.pyplot as plt
 
-
+# ====== Helper Functions =============
 def trace_prefix():
-    frame = inspect.currentframe().f_back
-    info = inspect.getframeinfo(frame)
-    return f"{GRAY}[{info.filename}:{info.lineno} ({info.function})]{RESET} "
+    frame = inspect.currentframe()
+    try:
+        info = inspect.getframeinfo(frame.f_back)  # type: ignore
+        return f"{GRAY}[{info.filename}:{info.lineno} ({info.function})]{RESET} "
+    finally:
+        del frame
 
 
-# Helper Functions
-def init_rand_subseq(arr: np.ndarray, l: int, r: int, _min: float, _max: float, seed: int = None) -> None:
+def handle_sigint(signum: int, frame): # type: ignore
+    """Shut down on Ctrl+C."""
+    print("Ctrl+C, terminating...")
+    sys.exit(0)
+
+
+def resolve_freq_scale(freq_scale: float)-> Tuple[float, str]:
+    scale_liter: Literal["G", 'M', "K", ""] = ""
+    if freq_scale == 1e9:  
+        scale_liter = "G"
+    elif freq_scale == 1e6:
+        scale_liter = "M"
+    elif freq_scale == 1e3:
+        scale_liter = "K"
+    else:
+        scale_liter = ""
+        freq_scale = 1
+    return freq_scale, scale_liter
+
+
+def freq2str(f: float, scale: float=1e3, precision:int = 3):
+    return f"{f/scale:_.{precision}f}"
+
+
+def get_full_scale(dtype: np.dtype | type) -> float:
+    """Приймає або np.dtype object, або type class (np.int16, np.uint8, etc)"""
+    dtype = np.dtype(dtype)  # Normalize обидва варіанти
+    if dtype == np.uint8:
+        full_scale = 128.0  # після центрування
+    elif np.issubdtype(dtype, np.floating):
+        full_scale = 1.0
+    else:
+        full_scale = np.iinfo(dtype).max
+    return full_scale
+
+
+def convert_raw_buffer_to_complex(_raw_byte_buffer: np.ndarray, n_bytes: int, 
+                                 complex_buffer: np.ndarray | None = None, 
+                                 normalize: bool = False, 
+                                 dtype: np.dtype | type = np.int16) -> np.ndarray:
+    """
+    Convert the raw byte buffer of IQ interleaved into complex64 samples.
+    If output buf provided use it.
+    
+    Special handling for uint8: converts 0-255 range to signed centered at 0.
+    """
+    dtype = np.dtype(dtype)
+    bps = dtype.itemsize * 2 # *2 бо interleaved I,Q
+    raw_samples = _raw_byte_buffer[:n_bytes].view(dtype)
+    valid_complex_samples = n_bytes // bps
+
+    # Fallback якщо пам'ять не виділена зпзделегіть
+    if complex_buffer is None:
+        complex_buffer = np.empty((valid_complex_samples,), dtype=np.complex64)
+
+    # Handle uint8 special case
+    if dtype == np.uint8:
+        complex_buffer.real[:valid_complex_samples] = (raw_samples[0::2][:valid_complex_samples] - 128.0)
+        complex_buffer.imag[:valid_complex_samples] = (raw_samples[1::2][:valid_complex_samples] - 128.0)
+    else:
+        complex_buffer.real[:valid_complex_samples] = raw_samples[0::2][:valid_complex_samples]
+        complex_buffer.imag[:valid_complex_samples] = raw_samples[1::2][:valid_complex_samples]
+
+    if normalize:
+        full_scale = get_full_scale(dtype)
+        complex_buffer.real[:valid_complex_samples] /= full_scale
+        complex_buffer.imag[:valid_complex_samples] /= full_scale
+
+    return complex_buffer[:valid_complex_samples]
+
+
+def now_str(color:bool = True):
+    """Current time 'HH:MM:SS'."""
+    now = datetime.now()
+    time_str = now.strftime("%H:%M:%S")    
+    return f"{YELLOW}{time_str}{RESET}" if color else time_str
+
+
+# ==== Не факт що потрібні ==================
+
+def read_sync_etalon(fpath: Path = Path("sync_etalon_sps10.csv"), verbose: bool = False)-> Tuple[np.ndarray, float]:
+    meta = {}
+    with open(fpath, "r") as f:
+        for line in f:
+            if not line.startswith("#"):
+                break
+            # парсимо ключі з першого рядка
+            if "sps" in line:
+                parts = line[1:].strip().split(',')
+                for p in parts:
+                    k, v = p.strip().split('=')
+                    meta[k.strip()] = v.strip()
+
+    M = np.loadtxt("sync_etalon_sps10.csv", delimiter=",", comments="#")
+    if verbose:
+        print(f"{INFO} File {YELLOW}{fpath}{RESET}")
+        print(f"        {meta}")  # {'rows': '5', 'cols': '240', 'sps': '10'}
+        print(f"        {M.shape=}")
+    return M, float(meta["sps"])
+
+
+def init_rand_subseq(arr: np.ndarray, l: int, r: int, _min: float, _max: float, seed: int|None = None) -> None:
     """
     Inplace Initialize a random subsequence of an pre allcated array between indices l and r.
     """
@@ -52,7 +160,7 @@ def init_rand_subseq(arr: np.ndarray, l: int, r: int, _min: float, _max: float, 
     arr[l:r] = np.random.uniform(_min, _max, r - l)
 
 
-def noise_signal(arr: np.ndarray, l: int, r: int, noise_min: float, noise_max: float, seed: int = None) -> None:
+def noise_signal(arr: np.ndarray, l: int, r: int, noise_min: float, noise_max: float, seed: int | None = None) -> None:
     """
     Inplace Add uniform random noise to the array[l:r].
     """
@@ -280,6 +388,58 @@ def plot_lab_detect_detailed(result: dict):
     print(f"Confidence drop: {np.mean(conf_clean) - np.mean(conf_noisy):.3f}")
 
 
+def detect_sync_positions(signal_in: np.ndarray, sync: np.ndarray, min_distance: int, top: int=10) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Args:
+        signal_in (np.ndarray): _description_
+        sync (np.ndarray): _description_
+        min_distance (int): 
+        top (int, optional): Defaults to 10.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: 
+            peaks, vals, corr = detect_sync_positions(...)
+    """
+    corr = np.correlate(signal_in, sync, mode='valid')
+    peaks = []
+    vals = []
+    work = corr.copy()
+    neg_inf = -np.inf
+    # select top peaks with non-maximum suppression
+    for _ in range(top): 
+        i = int(np.argmax(work))
+        if not np.isfinite(work[i]):
+            break
+        peaks.append(i)
+        vals.append(corr[i])
+        L = max(0, i - (min_distance - 1))
+        R = min(work.size, i + min_distance)
+        work[L:R] = neg_inf
+    return np.array(peaks), np.array(vals), corr
+
+
+# ==== Точно Good Feats ===============
+
+def ncc(x: np.ndarray, y: np.ndarray)->complex|float:
+    """
+    Normalized cross-correlation (одне значення для однакових довжин).
+
+    Для дійсних масивів:
+        Повертає коефіцієнт подібності ∈ [-1, 1].
+        +1 → сигнали ідентичні
+         0 → сигнали незалежні або ортогональні
+        -1 → сигнали дзеркально протилежні
+    Для комплексних:
+        Повертає комплексне число,
+        де |r| ∈ [0, 1] — ступінь кореляції
+            |r| ≈ 1 → форми збігаються
+            |r| ≈ 0 → незалежні
+        ∠r — середній фазовий зсув між сигналами.
+    """
+    assert x.size == y.size, f"length mismatch: {x.size} vs {y.size}"
+    r = np.vdot(x, y)  # conj(x) * y  - векторний добуток із комплексним спряженням першого аргументу
+    n = np.linalg.norm(x) * np.linalg.norm(y) + 1e-12  # sqrt(sum(|Xi|**2)) - евклідова норма
+    return r / n 
 
 
 def gen_sign(
@@ -397,6 +557,7 @@ def gen_sign(
             signal[guard_start:guard_end] = 0.0
 
     return signal, sync, corruption_stats
+
 
 def print_corruption_info(
     corruption_stats: Dict,
@@ -525,35 +686,6 @@ def plot_signal_structure(signal: np.ndarray, SYNC_LN: int, M: int, SUPER_FRAME_
 
     plt.show(block=block)
 
-
-def detect_sync_positions(signal_in: np.ndarray, sync: np.ndarray, min_distance: int, top: int=10) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Args:
-        signal_in (np.ndarray): _description_
-        sync (np.ndarray): _description_
-        min_distance (int): 
-        top (int, optional): Defaults to 10.
-
-    Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray]: 
-            peaks, vals, corr = detect_sync_positions(...)
-    """
-    corr = np.correlate(signal_in, sync, mode='valid')
-    peaks = []
-    vals = []
-    work = corr.copy()
-    neg_inf = -np.inf
-    # select top peaks with non-maximum suppression
-    for _ in range(top): 
-        i = int(np.argmax(work))
-        if not np.isfinite(work[i]):
-            break
-        peaks.append(i)
-        vals.append(corr[i])
-        L = max(0, i - min_distance)
-        R = min(work.size, i + min_distance)
-        work[L:R] = neg_inf
-    return np.array(peaks), np.array(vals), corr
 
 
 def plot_cross_corr(peaks:np.ndarray, vals:np.ndarray, corr:np.ndarray, title: str = "Cross-correlation with sync pattern", block:bool = False) -> None:

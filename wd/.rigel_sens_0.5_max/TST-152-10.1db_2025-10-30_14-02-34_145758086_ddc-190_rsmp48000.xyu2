@@ -1,0 +1,18 @@
+{
+  "cntrs": {
+    "BS_Data": 0,
+    "BS_Voice": 0,
+    "Error": 0,
+    "MS_Data": 3,
+    "MS_Voice": 32,
+    "RC_Sync": 0
+  },
+  "sessions_voice": [
+    {
+      "len": 548906,
+      "mismatchesCount": 1,
+      "pos0": 410666,
+      "type": "MS_V-+-"
+    }
+  ]
+}

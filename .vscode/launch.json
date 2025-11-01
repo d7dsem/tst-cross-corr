@@ -14,7 +14,18 @@
             // "args": "${command:pickArgs}"
         },
         {
-            "name": "CC",
+            "name": "CC mk5",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/cross_corr_mk5.py",
+            "console": "integratedTerminal",
+            "args": [
+                "-i", "e:/Work/source/repos/DSP/tst-cross-corr/wd/TST-152-10.1db_2025-10-30_14-02-34_145758086.wav",
+                "--verbose"
+            ]
+        },
+        {
+            "name": "CC mk4",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/cross_corr_mk4.py",

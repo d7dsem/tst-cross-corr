@@ -37,9 +37,10 @@ def build_cross_corr(signal_chunk: np.ndarray, srch_seq: np.ndarray, corr: np.nd
     expected_len = signal_chunk.size - srch_seq.size + 1
     assert expected_len > 0, "Search sequence longer than signal chunk."
     assert corr.shape == (expected_len,), "`corr` has wrong length."
-    out = np.correlate(signal_chunk, srch_seq, mode='valid')
-    # explicit copy to the provided buffer
-    corr[:] = out
+    corr[:] = np.correlate(signal_chunk, np.conj(srch_seq), mode='valid')
+    # out = np.correlate(signal_chunk, srch_seq, mode='valid')
+    # # explicit copy to the provided buffer
+    # corr[:] = out
 
 
 def detect_positions(corr: np.ndarray, chunk_start_idx: int, min_distance: int, z_thr: float = 6.0) -> Tuple[np.ndarray, np.ndarray]:
